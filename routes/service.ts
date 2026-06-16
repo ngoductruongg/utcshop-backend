@@ -1,7 +1,8 @@
 import express from 'express';
-import multer from 'multer'; // 1. IMPORT MULTER
-import path from 'path';     // 2. IMPORT PATH
+import multer from 'multer'; 
+import path from 'path';     
 import Service from '../models/Service';
+import Booking from '../models/Booking'; 
 import { verifyAdmin } from '../middleware/authMiddleware';
 
 const router = express.Router();
@@ -11,11 +12,9 @@ const router = express.Router();
 // ==========================================
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    // Đổ ảnh vào thư mục 'uploads' (Nhớ tự tạo thư mục này ở gốc Backend nhé)
     cb(null, 'uploads/'); 
   },
   filename: function (req, file, cb) {
-    // Đổi tên file để tránh trùng lặp: Thêm thời gian hiện tại vào trước
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
     cb(null, uniqueSuffix + path.extname(file.originalname));
   }
@@ -23,30 +22,39 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-
 // ==========================================
 // CÁC API CỦA DỊCH VỤ
 // ==========================================
 
 // [POST] Thêm dịch vụ mới (Chỉ Admin)
-// Thêm upload.single('image') vào sau verifyAdmin
 router.post('/', verifyAdmin, upload.single('image'), async (req: any, res: any): Promise<any> => {
   try {
     const { name, price, duration, description } = req.body;
-    let imageUrl = '';
 
-    // Nếu có file ảnh được tải lên từ máy tính
+    // 📍 1. BẮT LỖI SỐ ÂM
+    if (Number(price) < 0) {
+      return res.status(400).json({ message: 'Giá tiền không được để số âm!' });
+    }
+    if (Number(duration) < 0) {
+      return res.status(400).json({ message: 'Thời gian dịch vụ không được để số âm!' });
+    }
+
+    // 📍 2. BẮT LỖI SỐ LẺ (Phải là bội số của 5)
+    if (Number(duration) % 5 !== 0) {
+      return res.status(400).json({ message: 'Thời gian dịch vụ phải là số chẵn (VD: 30, 45, 60...), không được nhập số lẻ như 31, 32!' });
+    }
+
+    let imageUrl = '';
     if (req.file) {
-      // Nhớ đổi 5000 thành cổng Backend của bạn nếu bạn dùng cổng khác nhé!
       imageUrl = `http://localhost:5000/uploads/${req.file.filename}`;
     }
 
     const newService = new Service({
       name,
-      price,
-      duration,
+      price: Number(price), 
+      duration: Number(duration), 
       description,
-      image: imageUrl // Lưu đường dẫn ảnh vào DB
+      image: imageUrl 
     });
 
     await newService.save();
@@ -68,13 +76,23 @@ router.get('/', async (req, res) => {
 });
 
 // [PUT] API Sửa thông tin dịch vụ (Chỉ Admin)
-// Cập nhật thêm upload.single('image') để Admin có thể đổi ảnh khác
 router.put('/:id', verifyAdmin, upload.single('image'), async (req: any, res: any): Promise<any> => {
   try {
-    // Lấy toàn bộ data text mà Admin muốn sửa
+    // 📍 1. BẮT LỖI SỐ ÂM KHI SỬA
+    if (req.body.price !== undefined && Number(req.body.price) < 0) {
+      return res.status(400).json({ message: 'Giá tiền không được để số âm!' });
+    }
+    if (req.body.duration !== undefined && Number(req.body.duration) < 0) {
+      return res.status(400).json({ message: 'Thời gian dịch vụ không được để số âm!' });
+    }
+
+    // 📍 2. BẮT LỖI SỐ LẺ KHI SỬA
+    if (req.body.duration !== undefined && Number(req.body.duration) % 5 !== 0) {
+      return res.status(400).json({ message: 'Thời gian dịch vụ phải là số chẵn (VD: 30, 45, 60...), không được nhập số lẻ!' });
+    }
+
     const updateData = { ...req.body };
 
-    // Nếu Admin có chọn ảnh mới thì mới cập nhật link ảnh, không thì giữ nguyên ảnh cũ
     if (req.file) {
       updateData.image = `http://localhost:5000/uploads/${req.file.filename}`;
     }
@@ -95,10 +113,20 @@ router.put('/:id', verifyAdmin, upload.single('image'), async (req: any, res: an
   }
 });
 
-// [DELETE] API Xóa dịch vụ (Chỉ Admin)
+// [DELETE] API Xóa dịch vụ (Chỉ Admin) 
 router.delete('/:id', verifyAdmin, async (req, res): Promise<any> => {
   try {
-    const deletedService = await Service.findByIdAndDelete(req.params.id);
+    const serviceId = req.params.id;
+
+    const bookingCount = await Booking.countDocuments({ service: serviceId });
+
+    if (bookingCount > 0) {
+      return res.status(400).json({ 
+        message: `Không thể xóa! Dịch vụ này đang được liên kết với ${bookingCount} lịch hẹn trong hệ thống.` 
+      });
+    }
+
+    const deletedService = await Service.findByIdAndDelete(serviceId);
     
     if (!deletedService) {
       return res.status(404).json({ message: 'Không tìm thấy dịch vụ này!' });

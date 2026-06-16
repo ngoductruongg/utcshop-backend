@@ -1,7 +1,7 @@
 import express from 'express';
 import Order from '../models/Order';
 import Cart from '../models/Cart';
-import Product from '../models/Product'; // 📍 BỔ SUNG QUAN TRỌNG: Import model Product để trừ kho
+import Product from '../models/Product'; 
 import { verifyToken, verifyAdmin } from '../middleware/authMiddleware';
 
 const router = express.Router();
@@ -9,59 +9,93 @@ const router = express.Router();
 // ==========================================
 // [POST] Đặt hàng (Thanh toán Web & POS)
 // ==========================================
-// ==========================================\
-// [POST] Đặt hàng (Thanh toán Web & POS)
-// ==========================================\
 router.post('/', verifyToken, async (req: any, res): Promise<any> => {
   try {
     const { shippingAddress, phone, paymentMethod, items, totalPrice, status } = req.body;
-    const userId = req.user.userId;
+    const userId = req.user?.userId || req.user?._id || req.user?.id;
 
-    let orderItems = [];
-    let finalTotalPrice = 0;
-    let orderUser = userId;
+    let orderItems: any[] = [];
+    let finalTotalPrice = totalPrice || 0;
 
-    // 💡 TRƯỜNG HỢP 1: ĐƠN HÀNG TỪ MÁY POS
+    // ==========================================
+    // 💡 BƯỚC 1: LẤY SẢN PHẨM 
+    // ==========================================
     if (items && items.length > 0) {
-      orderItems = items;
-      finalTotalPrice = totalPrice;
+      // Đặt thẳng từ trang Checkout (FE truyền lên)
+      orderItems = items.map((item: any) => ({
+        product: item.product._id ? item.product._id : item.product, 
+        quantity: item.quantity || 1
+      }));
+    } else {
+      // Đặt từ Giỏ hàng (Tự động kéo từ DB)
+      const cart = await Cart.findOne({ user: userId }).populate('items.product');
       
-      if (req.body.user === null) {
-        orderUser = null as any; 
+      if (!cart || cart.items.length === 0) {
+        return res.status(400).json({ message: 'Giỏ hàng của bạn đang trống, không thể đặt hàng!' });
       }
 
-      // 🔥 BƯỚC BỔ SUNG QUAN TRỌNG: KIỂM TRA TỒN KHO TRƯỚC KHI TẠO ĐƠN
-      for (const item of orderItems) {
-        const product = await Product.findById(item.product);
-        
-        // Nếu không tìm thấy sản phẩm hoặc số lượng mua lớn hơn số lượng trong kho
-        if (!product) {
-          return res.status(404).json({ message: `Không tìm thấy sản phẩm có ID: ${item.product}` });
-        }
-        if (product.stock < item.quantity) {
-          return res.status(400).json({ 
-            message: `Sản phẩm "${product.name}" không đủ hàng! Trong kho còn: ${product.stock}, số lượng yêu cầu: ${item.quantity}` 
-          });
-        }
-      }
-    } 
-    // 💡 TRƯỜNG HỢP 2: KHÁCH HÀNG TỰ ĐẶT TRÊN WEB (Nếu có xử lý giỏ hàng)
-    // ... Giữ nguyên đoạn xử lý giỏ hàng của khách tự đặt ở phía dưới của bạn ...
+      orderItems = cart.items.map((item: any) => ({
+        product: item.product._id,
+        quantity: item.quantity
+      }));
+    }
 
-    // Khởi tạo đơn hàng mới khi tất cả sản phẩm đã qua vòng kiểm duyệt kho thành công
-    const newOrder = new Order({
-      user: orderUser,
+    if (orderItems.length === 0) {
+      return res.status(400).json({ message: 'Không có sản phẩm hợp lệ nào để đặt hàng!' });
+    }
+
+    // ==========================================
+    // 💡 BƯỚC 2: KIỂM TRA TỒN KHO & LẤY GIÁ GỐC SẢN PHẨM (FIX LỖI PRICE)
+    // ==========================================
+    let calculatedTotal = 0;
+
+    for (let i = 0; i < orderItems.length; i++) {
+      const product = await Product.findById(orderItems[i].product);
+      
+      if (!product) {
+        return res.status(404).json({ message: `Có sản phẩm trong đơn không còn tồn tại!` });
+      }
+      if (product.stock < orderItems[i].quantity) {
+        return res.status(400).json({ 
+          message: `Sản phẩm "${product.name}" chỉ còn ${product.stock} cái, không đủ để đặt!` 
+        });
+      }
+
+      // 📍 BẮT BUỘC: Gán giá gốc vào từng sản phẩm để lưu Database (Fix lỗi required price)
+      orderItems[i].price = product.price; 
+      
+      // Tính lại tổng tiền cho chính xác 100% dựa vào giá DB
+      calculatedTotal += (product.price * orderItems[i].quantity);
+    }
+
+    // Nếu FE không gửi tổng tiền, lấy tổng tiền tự tính
+    if (!finalTotalPrice) {
+      finalTotalPrice = calculatedTotal;
+    }
+
+   // 💡 BƯỚC 3: TẠO ĐƠN HÀNG VÀ LƯU DATABASE
+    // ==========================================
+    const orderData: any = {
+      user: userId,
       items: orderItems,
       totalPrice: finalTotalPrice,
       shippingAddress: shippingAddress || 'Mua trực tiếp tại quầy (POS)',
-      phone: phone || 'N/A',
-      paymentMethod,
-      status: status || 'Đã thanh toán'
-    });
+      phone: phone || 'Chưa cập nhật',
+      paymentMethod: paymentMethod || 'Tiền mặt'
+    };
 
+    // 📍 SỬA LỖI Ở ĐÂY: Chỉ gán status nếu FE thực sự gửi lên. 
+    // Nếu không, để trống cho Database TỰ ĐỘNG lấy giá trị mặc định của hệ thống!
+    if (status) {
+      orderData.status = status;
+    }
+
+    const newOrder = new Order(orderData);
     await newOrder.save();
 
-    // 📍 TIẾN HÀNH TRỪ KHO (Đoạn này chạy an toàn vì đã check ở trên)
+    // ==========================================
+    // 💡 BƯỚC 4: TRỪ KHO VÀ DỌN SẠCH GIỎ HÀNG
+    // ==========================================
     for (const item of orderItems) {
       await Product.findByIdAndUpdate(
         item.product,
@@ -69,10 +103,18 @@ router.post('/', verifyToken, async (req: any, res): Promise<any> => {
       );
     }
 
-    res.status(201).json({ message: 'Tạo đơn hàng thành công!', data: newOrder });
+    if (userId && (!items || items.length === 0)) {
+      await Cart.findOneAndUpdate(
+        { user: userId }, 
+        { items: [] }
+      );
+    }
 
-  } catch (error) {
-    res.status(500).json({ message: 'Lỗi server khi tạo đơn hàng', error });
+    res.status(201).json({ message: 'Đặt hàng thành công!', data: newOrder });
+
+  } catch (error: any) {
+    console.error("🚨 LỖI TẠO ĐƠN HÀNG:", error);
+    res.status(500).json({ message: 'Lỗi server khi tạo đơn hàng', error: error.message });
   }
 });
 
@@ -93,43 +135,77 @@ router.get('/me', verifyToken, async (req: any, res): Promise<any> => {
 // ==========================================
 // [PUT] Cập nhật trạng thái giao hàng (CÓ HOÀN KHO KHI HỦY)
 // ==========================================
+// router.put('/:id/status', verifyAdmin, async (req: any, res): Promise<any> => {
+//   try {
+//     const { status } = req.body;
+    
+//     const order = await Order.findById(req.params.id);
+//     if (!order) {
+//       return res.status(404).json({ message: 'Không tìm thấy đơn hàng!' });
+//     }
+
+//     const cancelStatuses = ['Đã hủy', 'Hủy đơn', 'Cancelled']; 
+    
+//     // Nếu chuyển sang trạng thái Hủy -> Cộng lại kho
+//     if (cancelStatuses.includes(status) && !cancelStatuses.includes(order.status)) {
+//       for (const item of order.items) {
+//         await Product.findByIdAndUpdate(
+//           item.product, 
+//           { $inc: { stock: item.quantity } } 
+//         );
+//       }
+//     }
+
+//     // Nếu lỡ Hủy, giờ đổi lại thành Đang giao -> Trừ lại kho
+//     if (!cancelStatuses.includes(status) && cancelStatuses.includes(order.status)) {
+//        for (const item of order.items) {
+//         await Product.findByIdAndUpdate(
+//           item.product, 
+//           { $inc: { stock: -item.quantity } } 
+//         );
+//       }
+//     }
+
+//     order.status = status;
+//     await order.save();
+    
+//     res.status(200).json({ message: 'Cập nhật trạng thái thành công', data: order });
+//   } catch (error) {
+//     res.status(500).json({ message: 'Lỗi server', error });
+//   }
+// });
+
+// ==========================================
+// [PUT] Cập nhật trạng thái giao hàng (CÓ HOÀN KHO KHI HỦY + LƯU NGÀY GIAO)
+// ==========================================
 router.put('/:id/status', verifyAdmin, async (req: any, res): Promise<any> => {
   try {
     const { status } = req.body;
     
-    // 1. TÌM ĐƠN HÀNG CŨ TRƯỚC (Để so sánh trạng thái)
     const order = await Order.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ message: 'Không tìm thấy đơn hàng!' });
     }
 
-    // 2. 📍 LOGIC HOÀN KHO NẾU ĐƠN BỊ HỦY
-    // Giả sử trạng thái hủy của bạn là 'Đã hủy' (hãy đổi lại cho khớp với chữ trên FE của bạn nếu cần)
     const cancelStatuses = ['Đã hủy', 'Hủy đơn', 'Cancelled']; 
     
-    // Nếu trạng thái mới gửi lên là Hủy, VÀ trạng thái hiện tại trong DB chưa phải là Hủy (để tránh cộng dồn nhiều lần)
     if (cancelStatuses.includes(status) && !cancelStatuses.includes(order.status)) {
-      
-      // Chạy vòng lặp qua các món hàng trong đơn và CỘNG LẠI kho
       for (const item of order.items) {
-        await Product.findByIdAndUpdate(
-          item.product, 
-          { $inc: { stock: item.quantity } } // Lần này dùng số DƯƠNG để cộng trả lại kho
-        );
+        await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.quantity } });
       }
     }
 
-    // (Nâng cao) 3. LOGIC TRỪ LẠI KHO NẾU ADMIN LỠ BẤM NHẦM "HỦY" RỒI ĐỔI LẠI THÀNH "ĐANG GIAO"
     if (!cancelStatuses.includes(status) && cancelStatuses.includes(order.status)) {
        for (const item of order.items) {
-        await Product.findByIdAndUpdate(
-          item.product, 
-          { $inc: { stock: -item.quantity } } // Trừ lại kho
-        );
+        await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.quantity } });
       }
     }
 
-    // 4. Lưu trạng thái mới vào DB
+    // 📍 THÊM MỚI: Nếu chuyển sang "Đang giao", ghi nhận thời gian bắt đầu giao
+    if (status === 'Đang giao' && order.status !== 'Đang giao') {
+      order.shippedAt = new Date();
+    }
+
     order.status = status;
     await order.save();
     
@@ -140,8 +216,38 @@ router.put('/:id/status', verifyAdmin, async (req: any, res): Promise<any> => {
 });
 
 // ==========================================
+// 📍 THÊM MỚI: [PUT] Khách hàng tự bấm "Đã nhận được hàng"
+// ==========================================
+router.put('/:id/receive', verifyToken, async (req: any, res): Promise<any> => {
+  try {
+    const order = await Order.findById(req.params.id);
+    
+    if (!order) {
+      return res.status(404).json({ message: 'Không tìm thấy đơn hàng!' });
+    }
+
+    // Kiểm tra xem đơn này có đúng của khách hàng đang đăng nhập không
+    if (order.user?.toString() !== req.user?.userId) {
+      return res.status(403).json({ message: 'Bạn không có quyền xác nhận đơn hàng này!' });
+    }
+
+    if (order.status !== 'Đang giao') {
+      return res.status(400).json({ message: 'Đơn hàng chưa được giao, không thể xác nhận!' });
+    }
+
+    order.status = 'Hoàn thành';
+    await order.save();
+    
+    res.status(200).json({ message: 'Cảm ơn bạn đã xác nhận nhận hàng!', data: order });
+  } catch (error) {
+    res.status(500).json({ message: 'Lỗi server', error });
+  }
+});
+
+// ==========================================
 // [GET] Admin lấy danh sách TẤT CẢ đơn hàng
 // ==========================================
+// (Đoạn này giữ nguyên của bạn)
 router.get('/', verifyAdmin, async (req: any, res): Promise<any> => {
   try {
     const orders = await Order.find()

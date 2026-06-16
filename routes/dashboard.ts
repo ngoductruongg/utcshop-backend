@@ -28,15 +28,56 @@ router.get('/stats', verifyAdmin, async (req, res): Promise<any> => {
       }
     });
 
-    // 4. Trả về một cục dữ liệu tổng hợp cho trang Dashboard
+    // ==========================================
+    // 📍 THÊM MỚI: 4. Dùng Aggregation Pipeline để tìm Top 5 dịch vụ
+    // ==========================================
+    const topServices = await Booking.aggregate([
+      // Bước 1: Lọc ra những lịch đã cắt xong thu tiền ('completed')
+      { $match: { status: 'completed' } }, 
+      
+      // Bước 2: Gom nhóm theo ID dịch vụ và Đếm số lần xuất hiện
+      { $group: { 
+          _id: '$service', 
+          totalBookings: { $sum: 1 } 
+      }},
+      
+      // Bước 3: Sắp xếp giảm dần theo số lượng đặt
+      { $sort: { totalBookings: -1 } },
+      
+      // Bước 4: Giới hạn chỉ lấy 5 dịch vụ đứng đầu để đưa lên Dashboard
+      { $limit: 5 },
+      
+      // Bước 5: Móc sang bảng 'services' để lấy được Tên dịch vụ
+      { $lookup: { 
+          from: 'services', // Tên collection dịch vụ trong DB (thường có s ở cuối)
+          localField: '_id', 
+          foreignField: '_id', 
+          as: 'serviceInfo' 
+      }},
+      
+      // Bước 6: Làm phẳng mảng (bỏ cái array bọc bên ngoài)
+      { $unwind: '$serviceInfo' },
+      
+      // Bước 7: Làm sạch dữ liệu trả về (chỉ lấy Tên và Số lượng đặt)
+      { $project: { 
+          _id: 0, 
+          serviceId: '$_id',
+          serviceName: '$serviceInfo.name', 
+          totalBookings: 1 
+      }}
+    ]);
+
+    // 5. Trả về một cục dữ liệu tổng hợp cho trang Dashboard
     res.status(200).json({
       message: 'Lấy dữ liệu thống kê thành công!',
       data: {
-        totalRevenue: totalRevenue,       // Tổng tiền kiếm được
-        totalCompleted: totalCompleted,   // Tổng đơn đã cắt xong thu tiền
-        totalPending: totalPending,       // Tổng đơn đang chờ duyệt
-        totalConfirmed: totalConfirmed,   // Tổng đơn đã chốt, chuẩn bị cắt
-        totalCancelled: totalCancelled    // Tổng đơn bị hủy
+        totalRevenue: totalRevenue,       
+        totalCompleted: totalCompleted,   
+        totalPending: totalPending,       
+        totalConfirmed: totalConfirmed,   
+        totalCancelled: totalCancelled,
+        // 📍 Trả thêm mảng Top Services về cho Frontend vẽ biểu đồ
+        topServices: topServices          
       }
     });
 

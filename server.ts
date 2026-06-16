@@ -20,6 +20,8 @@ import productCommentRoutes from './routes/productComment';
 import stylistRoutes from './routes/stylist';
 import newsRoutes from './routes/news'; // 👈 Import route news vào đây
 import bannerRoutes from './routes/banner'; // 👈 Import route banner vào đây
+import cron from 'node-cron'; // 👈 Import thư viện chạy ngầm
+import Order from './models/Order'; // 👈 Import model Order để bot gọi DB
 // Kích hoạt đọc file .env
 dotenv.config();
 
@@ -69,6 +71,35 @@ app.get('/add-test-service', async (req, res) => {
     res.send('✅ Đã thêm dịch vụ thành công! Hãy mở Compass lên xem nhé!');
   } catch (error) {
     res.status(500).send('❌ Có lỗi xảy ra: ' + error);
+  }
+});
+// ==========================================
+// 📍 HỆ THỐNG CHẠY NGẦM: TỰ ĐỘNG HOÀN THÀNH ĐƠN HÀNG SAU 7 NGÀY
+// ==========================================
+// Lịch trình: '0 0 * * *' nghĩa là chạy vào lúc 00:00 (nửa đêm) mỗi ngày
+cron.schedule('0 0 * * *', async () => {
+  console.log('🔄 [CRON JOB] Đang quét các đơn hàng treo...');
+  try {
+    // Lấy thời điểm chính xác 7 ngày trước so với hiện tại
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // Cập nhật tất cả các đơn Đang giao VÀ có ngày giao <= 7 ngày trước
+    const result = await Order.updateMany(
+      { 
+        status: 'Đang giao',
+        shippedAt: { $lte: sevenDaysAgo } 
+      },
+      { $set: { status: 'Hoàn thành' } }
+    );
+
+    if (result.modifiedCount > 0) {
+      console.log(`✅ [CRON JOB] Đã tự động chốt "Hoàn thành" cho ${result.modifiedCount} đơn hàng!`);
+    } else {
+      console.log('💤 [CRON JOB] Không có đơn hàng nào quá hạn.');
+    }
+  } catch (error) {
+    console.error('🚨 [CRON JOB] Lỗi quét đơn hàng:', error);
   }
 });
 // Kết nối với Database MongoDB

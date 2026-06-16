@@ -55,16 +55,31 @@ router.get('/', async (req: any, res): Promise<any> => {
 
 router.get('/user/:userId', async (req: any, res): Promise<any> => {
   try {
-    const myBookings = await Booking.find({ user: req.params.userId }).populate('service', 'name price duration').populate('stylist', 'name avatar').sort({ startTime: -1 });
+    // 1. Lấy danh sách Booking (dùng .lean() để biến thành object thuần javascript, dễ chỉnh sửa)
+    let myBookings = await Booking.find({ user: req.params.userId })
+        .populate('service', 'name price duration')
+        .populate('stylist', 'name avatar')
+        .sort({ startTime: -1 })
+        .lean(); 
+
+    // 2. Lấy toàn bộ Review của User này
+    const userReviews = await Review.find({ user: req.params.userId }).lean();
+
+    // 3. Gắn từng Review vào đúng Booking của nó
+    myBookings = myBookings.map((booking: any) => {
+      const reviewForThisBooking = userReviews.find(r => String(r.booking) === String(booking._id));
+      if (reviewForThisBooking) {
+        booking.review = reviewForThisBooking; // Nhét trọn vẹn data bài đánh giá (có _id) vào đây!
+      }
+      return booking;
+    });
+
     res.status(200).json({ data: myBookings });
   } catch (error) {
     res.status(500).json({ message: 'Lỗi server', error });
   }
 });
 
-// ==========================================
-// 📍 2 API MỚI CỦA THỢ LÀ NẰM ĐÚNG CHỖ NÀY
-// ==========================================
 // ==========================================
 // [GET] LẤY LỊCH CỦA THỢ (CÓ THỂ LỌC THEO NGÀY)
 // ==========================================
@@ -75,9 +90,8 @@ router.get('/my-schedule', verifyToken, async (req: any, res): Promise<any> => {
 
     let queryObj: any = { stylist: stylistId, status: { $ne: 'cancelled' } };
 
-    // Nếu Frontend có gửi ngày lên (VD: '2026-05-12'), ta sẽ lọc lịch từ 0h00 đến 23h59 của ngày đó
     if (dateParam) {
-      const startOfDay = new Date(`${dateParam}T00:00:00.000+07:00`); // Giờ VN
+      const startOfDay = new Date(`${dateParam}T00:00:00.000+07:00`); 
       const endOfDay = new Date(`${dateParam}T23:59:59.999+07:00`);
       queryObj.startTime = { $gte: startOfDay, $lte: endOfDay };
     }
@@ -85,7 +99,7 @@ router.get('/my-schedule', verifyToken, async (req: any, res): Promise<any> => {
     const schedules = await Booking.find(queryObj)
       .populate('user', 'name phone')
       .populate('service', 'name price duration')
-      .sort({ startTime: 1 }); // Sắp xếp giờ từ sáng đến tối
+      .sort({ startTime: 1 }); 
 
     res.status(200).json({ data: schedules });
   } catch (error) {
@@ -119,9 +133,6 @@ router.get('/my-stats', verifyToken, async (req: any, res): Promise<any> => {
   }
 });
 
-// ==========================================
-// CÁC API CŨ CỦA BẠN (GIỮ NGUYÊN)
-// ==========================================
 router.put('/:id/status', async (req: any, res): Promise<any> => {
   try {
     const { status } = req.body;
@@ -179,16 +190,34 @@ router.get('/busy-times', async (req: any, res): Promise<any> => {
   }
 });
 
+// ==========================================
+// 📍 API KHÓA LỊCH NHANH (ĐÃ ĐƯỢC NÂNG CẤP BÁO LỖI CHI TIẾT)
+// ==========================================
 router.post('/quick-block', async (req: any, res): Promise<any> => {
   try {
     const { stylist, startTime, duration, reason } = req.body;
     const start = new Date(startTime);
     const end = new Date(start.getTime() + duration * 60000);
+    
     const [overlapBooking, overlapBlock] = await Promise.all([
       Booking.findOne({ stylist, status: { $nin: ['cancelled', 'no-show'] }, $or: [{ startTime: { $lt: end }, endTime: { $gt: start } }] }),
       BlockedTime.findOne({ stylist, $or: [{ startTime: { $lt: end }, endTime: { $gt: start } }] })
     ]);
-    if (overlapBooking || overlapBlock) return res.status(400).json({ message: 'Đã trùng lịch!' });
+
+    if (overlapBooking) {
+      const busyUntil = new Date(overlapBooking.endTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+      return res.status(400).json({ 
+        message: `Thợ đang vướng lịch phục vụ khách khác đến ${busyUntil}. Vui lòng chọn khung giờ trống!` 
+      });
+    }
+
+    if (overlapBlock) {
+      const lockedUntil = new Date(overlapBlock.endTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+      return res.status(400).json({ 
+        message: `Thợ đã bị khóa lịch đến ${lockedUntil}. Bạn không thể đè lên lịch này!` 
+      });
+    }
+
     const newBlock = new BlockedTime({ stylist, startTime: start, endTime: end, reason });
     await newBlock.save();
     res.status(201).json({ message: 'Khóa thành công', data: newBlock });
